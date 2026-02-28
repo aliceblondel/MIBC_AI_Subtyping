@@ -1,0 +1,16 @@
+DATA_FOLDER: /path/to/data
+emb_folder: __DATA_FOLDER__/Embeddings
+slide_folder: __DATA_FOLDER__/Slides
+csv_path: __DATA_FOLDER__/slide.csv
+# annotation_folder: __DATA_FOLDER__/Annotations  # required for zone_id mode
+# segmentation_folder: __DATA_FOLDER__/Segmentations  # optional pre-computed segmentations
+encode_by: slide_id
+slide_id_col: slide_id
+patient_id_col: patient_id
+save_images: 0
+hes2he: 0
+mask_tolerance: 0.9
+magnification_tile: 20
+final_tile_size: 224
+num_workers: 8
+batch_size: 128

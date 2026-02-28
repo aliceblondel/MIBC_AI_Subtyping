@@ -1,0 +1,12 @@
+DATA_FOLDER: /path/to/data
+# display_gene_exp options:
+#   none                              → no individual gene maps (default)
+#   all                               → one heatmap per gene
+#   [GATA3, KRT6A, ENSG00000129514]  → specific genes (HGNC or Ensembl IDs)
+display_gene_exp: "none"
+localized: 1
+patient_id_col: patient_id
+slide_id_col: slide_id
+save_path: __DATA_FOLDER__/Results/
+slide_emb_folder: __DATA_FOLDER__/Embeddings/
+slide_csv: __DATA_FOLDER__/Embeddings/slide_info.csv

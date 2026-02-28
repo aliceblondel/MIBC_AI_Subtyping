@@ -1,0 +1,36 @@
+[project]
+name = "mibc-ai-subtyping"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.6.0",
+    "lightning==2.5.0",
+    "scanpy==1.11.0",
+    "timm",
+    "openslide-python",
+    "opencv-python",
+    "scikit-image",
+    "scikit-learn",
+    "albumentations",
+    "scipy",
+    "imageio",
+    "matplotlib",
+    "pandas",
+    "numpy",
+    "tqdm",
+    "statsmodels",
+    "seaborn",
+    "loguru>=0.7.3",
+    "rpy2==3.5.11",
+    "openslide-bin>=4.0.0.11",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
