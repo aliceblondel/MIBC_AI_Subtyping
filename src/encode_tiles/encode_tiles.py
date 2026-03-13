@@ -6,6 +6,8 @@ from pathlib import Path
 from loguru import logger
 from torch.utils.data import DataLoader
 
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 from src.encode_tiles.model import Hoptimus1Model
 from src.encode_tiles.dataset import st_collate_fn, WSITileDataset
 
