@@ -8,3 +8,4 @@ aggregate_by_patient: 0
 compute_metrics: 1
 adata_gt_path: __DATA_FOLDER__/gene_expression.h5ad
 use_mibc_detect: 1
+# use_tiles: 1     #  % of tiles per class, no attention

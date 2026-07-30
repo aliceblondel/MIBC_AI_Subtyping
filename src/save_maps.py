@@ -106,15 +106,12 @@ def save_maps(args_maps: Namespace) -> None:
         thumbnail = cv2.imread(str(thumbnail_path))
         thumbnail = cv2.cvtColor(thumbnail, cv2.COLOR_BGR2RGB)
 
-        if args_maps.use_learnt_classifier:
-            gene_exp, classif_pred, y_proba = model.tile_predict(he_emb, return_proba=True)
-        else:
-            gene_exp, classif_pred = model.tile_predict(he_emb)
+        gene_exp, classif_pred, y_proba = model.tile_predict(he_emb)
         gene_exp = np.array(gene_exp)
 
         # Save Predictions
         df_results = pd.DataFrame({"pred": classif_pred}, columns=["pred"])
-        if args_maps.use_learnt_classifier:
+        if y_proba is not None:
             proba_columns = [label + "_proba" for label in sorted(model.label_names)]
             df_results[proba_columns] = np.array(y_proba)
         df_results.to_csv(savepred_path / f"{slide_id}_predicted_subtype.csv")

@@ -21,6 +21,7 @@ def compute_metrics(
     save_path: Path,
     label_names: list[str] = LABELS,
     alpha_corr: float = 0.05,
+    proba_suffix: str = "proba",
 ) -> None:
     """Compute and save gene correlation and classification metrics.
 
@@ -93,7 +94,7 @@ def compute_metrics(
     if "target" not in res_df.columns:
         res_df = res_df.copy()
         res_df["target"] = adata_gt.obs.loc[res_df.index, "target"].values
-    classification_metrics(res_df, save_path, label_names=label_names)
+    classification_metrics(res_df, save_path, label_names=label_names, proba_suffix=proba_suffix)
 
 
 def gene_expression_metrics(
@@ -137,6 +138,7 @@ def classification_metrics(
     res_df: pd.DataFrame,
     save_path: Path,
     label_names: list[str] = LABELS,
+    proba_suffix: str = "proba",
 ) -> None:
     """Compute classification metrics and save them alongside a confusion matrix.
 
@@ -144,9 +146,10 @@ def classification_metrics(
     columns are present) weighted OVR ROC-AUC. Results are written to metrics.csv.
 
     Args:
-        res_df: DataFrame with 'target' and 'pred' columns, and optional '<label>_proba' columns.
+        res_df: DataFrame with 'target' and 'pred' columns, and optional '<label>_<proba_suffix>' columns.
         save_path: Directory in which to write metrics.csv and the confusion matrix PNG.
         label_names: Ordered list of class labels.
+        proba_suffix: Suffix of the per-label probability columns (e.g. 'proba' or 'tiles').
     """
     labels, preds = res_df["target"], res_df["pred"]
     conf_matrix = confusion_matrix(labels, preds, labels=label_names)
@@ -168,7 +171,7 @@ def classification_metrics(
     logger.info(f"Accuracy: {acc:.3f} | Balanced accuracy: {ba:.3f} | Precision: {precision:.3f} | Recall: {recall:.3f}")
 
     # ROC AUC
-    columns = [label + "_proba" for label in sorted(label_names)]
+    columns = [label + f"_{proba_suffix}" for label in sorted(label_names)]
     if all(col in res_df.columns for col in columns):
         y_proba = np.array(res_df[columns])
         roc_auc = roc_auc_score(labels, y_proba, average="weighted", multi_class="ovr")

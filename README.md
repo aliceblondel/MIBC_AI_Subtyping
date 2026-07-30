@@ -11,7 +11,7 @@ Preprint: https://www.biorxiv.org/content/10.1101/2025.10.23.684013v1
 Three steps:
 
 1. **Encode slides** with [H-optimus-1](https://huggingface.co/bioptimus/H-optimus-1)
-2. **Slide-level prediction** — subtype probabilities + predicted gene expression
+2. **Slide-level / patient-level prediction** — subtype probabilities + predicted gene expression
 3. **Generate spatial maps** (per-tile subtype classification + gene expression heatmaps)
 
 ## Installation
@@ -82,7 +82,7 @@ Outputs saved under `emb_folder/`:
 - `slide_info.csv` — per-slide metadata (tile size, magnification, dimensions, tile count)
 - `tiles_xy.csv` — all tile coordinates across slides
 
-### Step 2 — Slide-level prediction
+### Step 2 — Slide-level / patient-level prediction
 
 Edit `configs/predict.yaml` with your paths, then:
 
@@ -102,6 +102,7 @@ Key config parameters:
 | `save_path` | Output directory |
 | `use_mibc_detect` | `1`: first detect NMIBC/Non-Tumor slides and filter to MIBC tiles before subtyping; `0`: run subtype prediction directly on all tiles |
 | `use_learnt_classifier` | `1`: use the trained tile-level classifier for subtype prediction; `0`: use consensus classification via R (`consensusMIBC`) |
+| `use_tiles` | `1`: If set to 1, each tile votes its argmax class and the prediction is the per-class fraction of tiles ("% of tiles", no attention); `0` (default): attention-pooled slide-level prediction |
 | `compute_metrics` | Set to `1` to compute metrics against GT (optional) |
 | `adata_gt_path` | Path to ground-truth `.h5ad` file (required if `compute_metrics: 1`) |
 
@@ -123,11 +124,11 @@ adata_gt.obs["target"] = labels.values
 ```
 - **`var_names`**: Ensembl gene IDs.
 
-Outputs saved under `save_path/`:
-- `predictions/predicted_subtype.csv` — slide-level predictions and probabilities
-- `predictions/predicted_expression.h5ad` — predicted gene expression per slide
-- `metrics/gene_corr.csv` + `gene_corr.png` — per-gene Pearson correlation (if `compute_metrics`)
-- `metrics/metrics.csv` + `test_conf_matrix.png` — classification metrics (if `compute_metrics`)
+Outputs saved under `save_path/`, with a `_proba` (default) or `_tiles` (`use_tiles: 1`) suffix so the two modes never overwrite each other:
+- `predictions/predicted_subtype_{proba|tiles}.csv` — slide-level predictions and probabilities
+- `predictions/predicted_expression_{proba|tiles}.h5ad` — predicted gene expression per slide
+- `metrics_{proba|tiles}/gene_corr.csv` + `gene_corr.png` — per-gene Pearson correlation (if `compute_metrics`)
+- `metrics_{proba|tiles}/metrics.csv` + `test_conf_matrix.png` — classification metrics (if `compute_metrics`)
 
 ### Step 3 — Spatial maps
 

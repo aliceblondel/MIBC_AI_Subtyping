@@ -46,6 +46,15 @@ class LitModel(L.LightningModule):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(x)
 
+    def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model.predict(x)
+
+    def predict_per_tile(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model.predict_per_tile(x)
+
+    def predict_tiles(self, x: torch.Tensor, one_hot: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model.predict_tiles(x, one_hot)
+
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """Compute combined MSE (gene expression) + cross-entropy (subtype) loss."""
         inputs, targets, labels = batch
@@ -214,9 +223,7 @@ class TileClassifier(L.LightningModule):
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         logits = self.forward(x)
-        proba = F.softmax(logits, dim=1)
-        preds = torch.argmax(proba, dim=1)
-        return preds
+        return F.softmax(logits, dim=-1)
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         inputs, labels, _ = batch

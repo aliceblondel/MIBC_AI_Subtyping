@@ -56,6 +56,7 @@ def predict(predict_args: Namespace) -> None:
 
     # Predict Patient by Patient
     logger.info("Running inference...")
+    col_suffix = "tiles" if predict_args.use_tiles else "proba"
     ids, all_preds, all_proba, all_pred_exp = [], [], [], []
     for he_emb, _, group_id, _ in tqdm(dataloader):
 
@@ -65,11 +66,9 @@ def predict(predict_args: Namespace) -> None:
         else:
             predict_fct = model.predict_molecular_subtypes
         
-        if predict_args.use_learnt_classifier:
-            gene_exp, pred, proba = predict_fct(he_emb, return_proba=True)
+        gene_exp, pred, proba = predict_fct(he_emb, use_tiles=predict_args.use_tiles)
+        if proba is not None:
             all_proba.append(proba.cpu())
-        else:
-            gene_exp, pred = predict_fct(he_emb, return_proba=False)
 
         ids.append(group_id[0])
         all_preds.append(pred)
@@ -78,10 +77,11 @@ def predict(predict_args: Namespace) -> None:
     # Save results
     df_results = pd.DataFrame({"pred": all_preds}, index=ids)
     if predict_args.use_learnt_classifier:
-        proba_columns = [label + "_proba" for label in sorted(model.label_names)]
+        proba_columns = [label + f"_{col_suffix}" for label in sorted(model.label_names)]
         df_results[proba_columns] = np.array(all_proba)
-    df_results.to_csv(savepred_path / "predicted_subtype.csv")
-    logger.info(f"Predictions saved to {savepred_path / 'predicted_subtype.csv'}")
+    subtype_path = savepred_path / f"predicted_subtype_{col_suffix}.csv"
+    df_results.to_csv(subtype_path)
+    logger.info(f"Predictions saved to {subtype_path}")
 
     adata_pred = sc.AnnData(
         X=np.array(all_pred_exp),
@@ -92,13 +92,14 @@ def predict(predict_args: Namespace) -> None:
         ),
     )
     adata_pred.obs = df_results
-    adata_pred.write(savepred_path / "predicted_expression.h5ad")
-    logger.info(f"Predicted expression saved to {savepred_path / 'predicted_expression.h5ad'}")
+    expression_path = savepred_path / f"predicted_expression_{col_suffix}.h5ad"
+    adata_pred.write(expression_path)
+    logger.info(f"Predicted expression saved to {expression_path}")
 
     if (predict_args.adata_gt_path is not None) and (predict_args.compute_metrics):
         adata_gt = sc.read_h5ad(predict_args.adata_gt_path)
-        res_df = pd.read_csv(savepred_path / "predicted_subtype.csv", index_col = 0)
-        adata_pred = sc.read_h5ad(savepred_path / "predicted_expression.h5ad")
+        res_df = pd.read_csv(subtype_path, index_col = 0)
+        adata_pred = sc.read_h5ad(expression_path)
 
         # Validate that GT slides cover all predicted slides
         predicted_ids = set(res_df.index)
@@ -109,12 +110,13 @@ def predict(predict_args: Namespace) -> None:
             f"Make sure adata_gt.obs_names match the '{predict_args.patient_id_col}' column values."
         )
 
-        save_metric_path = Path(savepred_path.parent / "metrics")
+        save_metric_path = Path(savepred_path.parent / f"metrics_{col_suffix}")
         compute_metrics(
             res_df,
             adata_pred = adata_pred,
             adata_gt = adata_gt,
             save_path = save_metric_path,
+            proba_suffix = col_suffix,
         )
 
 

@@ -114,7 +114,7 @@ class SimpleTransformer(nn.Module):
 class PoolingFunction(nn.Module):
     """Aggregates tile embeddings into a slide representation.
 
-    Supported pooling strategies: 'attmil' (multi-head attention MIL), 'mean', 'max'.
+    Supported pooling strategies: 'attmil' (multi-head attention MIL), 'mean'.
     """
 
     def __init__(
@@ -151,10 +151,9 @@ class PoolingFunction(nn.Module):
             slide = slide.flatten(1, -1) # (bs, nheads*nfeatures)
 
         elif self.pooling == 'mean':
+            if scores is not None:
+                x = scores
             slide = torch.mean(x, -2) # BxF
-        
-        elif self.pooling == 'max':
-            slide = torch.max(x, -2) # BxF
 
         else:
             print(f'{self.pooling} pooling function not yet implemented``')
@@ -368,4 +367,36 @@ class BulkMIL(pl.LightningModule):
             classif = classif.view(bs, nbt, self.num_classes)
 
         return gene_exp, classif
-    
+
+    def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Input x of size BxNxF. Returns slide-level (gene_exp, classif_proba) via the standard forward pipeline."""
+        gene_exp, classif = self.forward(x)
+        classif = F.softmax(classif, dim=-1)
+        return gene_exp, classif
+
+    def predict_per_tile(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Input x of size BxNxF. Returns per-tile (gene_exp, classif_proba) without aggregation."""
+        ge, cl = self.forward_per_tile(x)
+        return ge, F.softmax(cl, dim=-1)
+
+    def predict_tiles(self, x: torch.Tensor, one_hot: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+        """Slide-level prediction aggregated from per-tile classification, without attention.
+
+        If one_hot=True, each tile votes its argmax class and the aggregated classif
+        is the per-class fraction of tiles (patient-level "% of tiles" prediction).
+        If one_hot=False, per-tile softmax probabilities are averaged instead.
+        """
+        gene_exp_tiles, classif_tiles = self.forward_per_tile(x)
+
+        if one_hot:
+            num_classes = classif_tiles.size(-1)
+            pred_tiles = torch.argmax(classif_tiles, dim=-1)
+            classif_tiles = F.one_hot(pred_tiles, num_classes=num_classes).float()
+        else:
+            classif_tiles = F.softmax(classif_tiles, dim=-1)
+
+        classif = self.pooling_function(x, scores=classif_tiles) # bs, num_classes
+        gene_exp = self.pooling_function(x, scores=gene_exp_tiles)
+
+        return gene_exp, classif
+

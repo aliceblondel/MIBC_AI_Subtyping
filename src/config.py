@@ -92,6 +92,7 @@ def get_predict_args(arg_list: list[str] | None = None, config_path: str | None 
     parser.add_argument("--adata_gt_path", type=str, default=None)
     parser.add_argument("--use_mibc_detect", type=int, default=1)
     parser.add_argument("--use_learnt_classifier", type=int, default=1)
+    parser.add_argument("--use_tiles", type=int, default=0)
 
     if config_path:
         arg_list = load_yaml_config(config_path)

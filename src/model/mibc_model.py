@@ -2,7 +2,6 @@ import torch
 import pandas as pd
 from pathlib import Path
 from loguru import logger
-import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 
 from src.constants import LABELS
@@ -147,6 +146,36 @@ class MIBCModel():
 
         return models
     
+    def _ensemble_mean(self, models: list, fn) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        """Run fn(model) for every ensemble member and average the outputs.
+
+        fn may return a single tensor or a tuple of tensors; either way, the per-model
+        outputs are stacked along a new leading dim and averaged over it.
+        """
+        with torch.no_grad():
+            outputs = [fn(model) for model in models]
+        if isinstance(outputs[0], tuple):
+            return tuple(
+                torch.stack([o[i] for o in outputs], dim=0).mean(dim=0)
+                for i in range(len(outputs[0]))
+            )
+        return torch.stack(outputs, dim=0).mean(dim=0)
+
+    def _get_pred(self, gene_exp: torch.Tensor, proba: torch.Tensor | None = None, tile_level: bool = False):
+        """Predict subtype label(s) from proba (learnt classifier) or gene_exp (consensus classifier)."""
+        if self.use_learnt_classifier:
+            pred_idx = torch.argmax(proba, axis=-1).cpu()
+            if tile_level:
+                return pd.Series([self.label_names[p] for p in pred_idx.tolist()])
+            return self.label_names[pred_idx]
+
+        from src.consensus_class import pred_consensus_class
+        logger.debug("Applying consensus classifier ...")
+        kw = {"columns": range(gene_exp.shape[0])} if tile_level else {}
+        df = pd.DataFrame(gene_exp.T, index=self.ensembl_gene_ids, **kw)
+        result = pred_consensus_class(df)
+        return result if tile_level else result.values[0]
+
     def predict_nmibc_mibc_nt(self, he_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Run tile-level MIBC / NMIBC / Non-Tumor classification with the detection ensemble.
 
@@ -156,52 +185,51 @@ class MIBCModel():
         Returns:
             Tuple of (per-tile predicted class ids, per-tile softmax probabilities).
         """
-        model_mibc_probas = []
-        with torch.no_grad():
-            for mibc_model in self.mibc_models:
-                model_mibc_proba = F.softmax(mibc_model(he_emb[0]), dim=-1)
-                model_mibc_probas.append(model_mibc_proba)
-        mibc_probas = torch.stack(model_mibc_probas, dim=0).mean(axis=0)
-        mibc_probas = F.softmax(mibc_probas, dim=-1)
+        mibc_probas = self._ensemble_mean(
+            self.mibc_models,
+            lambda mibc_model: mibc_model.predict(he_emb[0]),
+        )
         mibc_preds = torch.argmax(mibc_probas, axis=-1).cpu()
         return mibc_preds, mibc_probas
-    
-    def predict_molecular_subtypes(self, he_emb: torch.Tensor, return_proba: bool = False) -> tuple:
+
+    def predict_molecular_subtypes(
+        self, he_emb: torch.Tensor, use_tiles: bool = False,
+    ) -> tuple:
         """Predict slide-level molecular subtype and gene expression with the subtyping ensemble.
 
         Args:
             he_emb: Tile embeddings of shape (1, N, F).
-            return_proba: If True, also return the class probability vector.
+            use_tiles: If True, patient-level prediction from per-tile classification instead
+                of the attention-pooled slide representation: each tile votes its argmax class
+                and the slide probability is the per-class fraction of tiles ("% of tiles",
+                no attention).
 
         Returns:
-            (gene_exp, pred) or (gene_exp, pred, proba) depending on return_proba.
+            (gene_exp, pred, proba) — proba is None when using the consensus classifier.
         """
-        assert not (return_proba and not self.use_learnt_classifier), \
-            "return_proba=True is not supported with consensus classifier"
+        def fn(model):
+            if use_tiles:
+                # Checkpoints are trained with attmil pooling; force plain averaging of the
+                # per-tile one-hot votes so the "% of tiles" prediction bypasses attention.
+                pooling = model.model.pooling_function
+                trained_pooling_fct, pooling.pooling = pooling.pooling, "mean"
+                gene_exp, classif_proba = model.predict_tiles(he_emb, one_hot=True)
+                pooling.pooling = trained_pooling_fct
+            else:
+                gene_exp, classif_proba = model.predict(he_emb)
+            return gene_exp[0], classif_proba[0]
 
-        model_gene_exps, model_classifs = [], []
-        for i, model in enumerate(self.models):
-            with torch.no_grad():
-                model_gene_exp, model_classif_proba = model.model(he_emb)
-                model_classif_proba = F.softmax(model_classif_proba, dim=-1)
-                model_gene_exps.append(model_gene_exp[0])
-                model_classifs.append(model_classif_proba[0])
-        gene_exp = torch.stack(model_gene_exps, dim=0).mean(axis=0).cpu()
-        classif_proba = torch.stack(model_classifs, dim=0).mean(axis=0).cpu()
+        gene_exp, classif_proba = self._ensemble_mean(self.models, fn)
+        gene_exp, classif_proba = gene_exp.cpu(), classif_proba.cpu()
 
-        if self.use_learnt_classifier:
-            pred = torch.argmax(classif_proba, axis=-1).cpu()
-            pred = self.label_names[pred]
-            if return_proba:
-                return gene_exp, pred, classif_proba
-        else:
-            from src.consensus_class import pred_consensus_class
-            df_expression = pd.DataFrame(gene_exp.T, index=self.ensembl_gene_ids)
-            pred = pred_consensus_class(df_expression).values[0]
+        pred = self._get_pred(gene_exp, classif_proba)
+        proba = classif_proba if self.use_learnt_classifier else None
+        return gene_exp, pred, proba
 
-        return gene_exp, pred
-    
-    def slide_predict(self, he_emb: torch.Tensor, nmibc_threshold: float = 0.99, nt_threshold: float = 0.99, return_proba: bool = False) -> tuple:
+    def slide_predict(
+        self, he_emb: torch.Tensor, nmibc_threshold: float = 0.9, nt_threshold: float = 0.9,
+        use_tiles: bool = False,
+    ) -> tuple:
         """Predict slide-level subtype, filtering non-MIBC tiles before subtyping.
 
         If more than nmibc_threshold of tiles are classified as NMIBC (or NT),
@@ -212,90 +240,67 @@ class MIBCModel():
             he_emb: Tile embeddings of shape (1, N, F).
             nmibc_threshold: Fraction of NMIBC tiles above which the slide is called NMIBC.
             nt_threshold: Fraction of NT tiles above which the slide is called Non-Tumor.
-            return_proba: If True, also return class probabilities.
+            use_tiles: If True, patient-level prediction from per-tile classification instead
+                of the attention-pooled slide representation ("% of tiles", no attention).
+
+        Returns:
+            (gene_exp, pred, proba) — proba is None when using the consensus classifier.
         """
         n_tiles = he_emb.shape[1]
         mibc_preds, _ = self.predict_nmibc_mibc_nt(he_emb)
-        if (mibc_preds == NMIBC_ID).sum() > nmibc_threshold * n_tiles:
-            gene_exp = torch.zeros(self.num_genes, device=he_emb.device)
-            if return_proba:
-                proba = torch.ones(self.num_classes, device=he_emb.device)
-                proba = proba / proba.sum() 
-                return gene_exp, "NMIBC", proba
-            return gene_exp, "NMIBC"
-        
-        if (mibc_preds == NT_ID).sum() > nt_threshold * n_tiles:
-            gene_exp = torch.zeros(self.num_genes, device=he_emb.device)
-            if return_proba:
-                proba = torch.ones(self.num_classes, device=he_emb.device)
-                proba = proba / proba.sum() 
-                return gene_exp, "Non-Tumor", proba
-            return gene_exp, "Non-Tumor"
-        
+        for pred_id, threshold, label in [
+            (NMIBC_ID, nmibc_threshold, "NMIBC"),
+            (NT_ID,    nt_threshold,    "Non-Tumor"),
+        ]:
+            if (mibc_preds == pred_id).sum() > threshold * n_tiles:
+                gene_exp = torch.zeros(self.num_genes, device=he_emb.device)
+                proba = torch.ones(self.num_classes, device=he_emb.device) / self.num_classes \
+                    if self.use_learnt_classifier else None
+                return gene_exp, label, proba
+
         mibc_mask = mibc_preds == MIBC_ID
         filtered_he_emb = he_emb[:,mibc_mask,:]
-        
-        return self.predict_molecular_subtypes(
-                    filtered_he_emb, return_proba=return_proba)
+
+        return self.predict_molecular_subtypes(filtered_he_emb, use_tiles=use_tiles)
     
-    def tile_molecular_subtypes(self, he_emb: torch.Tensor, return_proba: bool = False) -> tuple:
+    def tile_molecular_subtypes(self, he_emb: torch.Tensor) -> tuple:
         """Predict per-tile molecular subtype and gene expression.
 
         Args:
             he_emb: Tile embeddings of shape (1, N, F).
-            return_proba: If True, also return per-tile class probabilities.
 
         Returns:
-            (gene_exp, pred_series) or (gene_exp, pred_series, y_proba).
+            (gene_exp, pred_series, y_proba) — y_proba is None when using the consensus classifier.
         """
-        assert not (return_proba and not self.use_learnt_classifier), \
-            "return_proba=True is not supported with consensus classifier"
+        def fn(model):
+            gene_exp, classif_proba = model.predict_per_tile(he_emb)
+            return gene_exp[0], classif_proba[0]
 
-        # Forward gene expression - per tile
-        model_gene_exps, model_classifs = [], []
-        for model in self.models:
-            with torch.no_grad():
-                model_gene_exp, model_classif = model.model.forward_per_tile(he_emb)
-                model_gene_exps.append(model_gene_exp[0]) 
-                model_classifs.append(model_classif[0])           
-        gene_exp = torch.stack(model_gene_exps, dim=0).mean(axis=0).cpu()
-        y_proba = torch.stack(model_classifs, dim=0).mean(axis=0).cpu()
-        y_proba = F.softmax(y_proba, dim=1)
+        gene_exp, y_proba = self._ensemble_mean(self.models, fn)
+        gene_exp, y_proba = gene_exp.cpu(), y_proba.cpu()
 
-        if self.use_learnt_classifier:
-            pred = torch.argmax(y_proba, axis=-1).cpu()
-            pred = pd.Series([self.label_names[p] for p in pred.tolist()])
-        else:
-            from src.consensus_class import pred_consensus_class
-            df_expression = pd.DataFrame(
-                gene_exp.T, index=self.ensembl_gene_ids, columns=range(gene_exp.shape[0]))
-            pred = pred_consensus_class(df_expression)
+        pred = self._get_pred(gene_exp, y_proba, tile_level=True)
+        if not self.use_learnt_classifier:
             y_proba = None
-        if return_proba:
-            return gene_exp, pred, y_proba
-        else:
-            return gene_exp, pred
+        return gene_exp, pred, y_proba
 
-    def tile_predict(self, he_emb: torch.Tensor, return_proba: bool = False) -> tuple:
+    def tile_predict(self, he_emb: torch.Tensor) -> tuple:
         """Per-tile prediction: subtype + gene expression, with NMIBC/NT tiles zeroed out.
 
         Args:
             he_emb: Tile embeddings of shape (1, N, F).
-            return_proba: If True, also return per-tile class probabilities.
+
+        Returns:
+            (gene_exp, pred_series, y_proba) — y_proba is None when using the consensus classifier.
         """
         mibc_preds, _ = self.predict_nmibc_mibc_nt(he_emb)
-        if return_proba:
-            gene_exp, pred, y_proba = self.tile_molecular_subtypes(he_emb, return_proba=True)
-        else:
-            gene_exp, pred = self.tile_molecular_subtypes(he_emb)
-            
+        gene_exp, pred, y_proba = self.tile_molecular_subtypes(he_emb)
+
         # Remove NT / NMIB
         not_mibc = mibc_preds != MIBC_ID
         gene_exp[not_mibc] = 0
         pred[mibc_preds.detach().cpu().numpy() == NMIBC_ID] = "NMIBC"
         pred[mibc_preds.detach().cpu().numpy() == NT_ID] = "Non-Tumor"
 
-        if return_proba:
-            return gene_exp, pred, y_proba
-        return gene_exp, pred
+        return gene_exp, pred, y_proba
     
