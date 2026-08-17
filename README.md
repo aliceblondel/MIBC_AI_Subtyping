@@ -103,7 +103,7 @@ Key config parameters:
 | `use_mibc_detect` | `1`: first detect NMIBC/Non-Tumor slides and filter to MIBC tiles before subtyping; `0`: run subtype prediction directly on all tiles |
 | `use_learnt_classifier` | `1`: use the trained tile-level classifier for subtype prediction; `0`: use consensus classification via R (`consensusMIBC`) |
 | `use_tiles` | `1`: If set to 1, each tile votes its argmax class and the prediction is the per-class fraction of tiles ("% of tiles", no attention); `0` (default): attention-pooled slide-level prediction |
-| `compute_metrics` | Set to `1` to compute metrics against GT (optional) |
+| `compute_metrics` | `1`: compute metrics against GT; `0` (default): predictions only, no GT needed |
 | `adata_gt_path` | Path to ground-truth `.h5ad` file (required if `compute_metrics: 1`) |
 
 #### CSV format
