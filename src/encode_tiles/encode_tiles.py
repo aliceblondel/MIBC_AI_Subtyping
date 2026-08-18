@@ -178,24 +178,33 @@ def encode_dataset(
     thumbnail_mask_folder = emb_folder / 'thumbnail_masks'
     thumbnail_folder = emb_folder / 'thumbnails'
 
-    for folder in [emb_folder, emb_folder, tiles_folder, xy_folder, images_folder, csv_folder, thumbnail_folder]:
+    for folder in [emb_folder, tiles_folder, xy_folder, images_folder, csv_folder, thumbnail_folder]:
         folder.mkdir(parents=True, exist_ok=True)
+
+    tiles_xy_path = emb_folder / "tiles_xy.csv"
+    slide_info_path = emb_folder / "slide_info.csv"
 
     # Model
     device = get_device()
     logger.info(f"Using device: {device}")
     model = Hoptimus1Model(device = device)
     logger.info(f"✅ Load H-Optimus-1 model")
-    
+
     # Encodes Slides
     df = read_df(csv_path)
 
-    dfs = []
-    info_df = pd.DataFrame(columns=["slide_id", "patient_id", "tile_size_mag0", "mag_level0", "n_tiles", "width", "height"])
     ids = df[encode_by].unique()
     logger.info(f"Encoding {len(ids)} {encode_by}(s) → {emb_folder}")
+    n_skipped = 0
     with torch.no_grad():
         for id in ids:
+            tile_emb_path = tiles_folder / f'{id}.npy'
+            tile_xy_path = xy_folder / f'{id}.npy'
+            if tile_emb_path.exists() and tile_xy_path.exists():
+                logger.info(f"Skipping {encode_by} {id}: embeddings already exist (resuming)")
+                n_skipped += 1
+                continue
+
             slide_dict = get_slide_dict(df, id, encode_by,
                     slide_folder=slide_folder, annotation_folder=annotation_folder, slide_id_col=slide_id_col)
             logger.info(f"Encoding {encode_by}: {id}")
@@ -217,20 +226,18 @@ def encode_dataset(
                 num_workers=num_workers,
                 batch_size=batch_size,
             )
-            tile_emb_path = tiles_folder / f'{id}.npy'
-            tile_xy_path = xy_folder / f'{id}.npy'
 
             if tile_embeddings is not None and tile_embeddings.size > 0:
                 np.save(tile_emb_path, tile_embeddings)
                 np.save(tile_xy_path, tile_xys)
-                tile_df[encode_by] = id
-                dfs.append(tile_df)
+                tile_df.to_csv(tiles_xy_path, 
+                    mode='a', header=not tiles_xy_path.exists(), index=False)
 
                 # Get metadata from slide_metadata (one entry per slide in slide_dict)
                 for slide_id, slide_metadata in metadata.items():
                     slide_row = df[df[slide_id_col] == slide_id]
                     patient_id = slide_row[patient_id_col].values[0] if patient_id_col in df.columns and len(slide_row) > 0 else None
-                    info_df = pd.concat([info_df, pd.DataFrame([{
+                    info_df = pd.DataFrame([{
                             "slide_id": slide_id,
                             "patient_id": patient_id,
                             "tile_size_mag0": slide_metadata.get("tile_size_mag0"),
@@ -238,17 +245,19 @@ def encode_dataset(
                             "n_tiles": tile_embeddings.shape[0],
                             "width": slide_metadata.get("width"),
                             "height": slide_metadata.get("height"),
-                        }])], ignore_index=True)
+                        }])
+                    info_df.to_csv(slide_info_path, 
+                        mode='a', header=not slide_info_path.exists(), index=False)
                 logger.info(f"Saved {tile_embeddings.shape[0]} tile embeddings for {encode_by} {id}")
             else:
                 logger.warning(f"Empty embeddings for {encode_by} {id}, skipping")
 
+    if n_skipped:
+        logger.info(f"Resumed run: skipped {n_skipped}/{len(ids)} already-encoded {encode_by}(s)")
 
-    tiles_df = pd.concat(dfs, ignore_index=True)
-    tiles_df.to_csv(emb_folder / "tiles_xy.csv", index=False)
-    info_df = info_df.drop_duplicates(subset=["slide_id"], keep="last")
-    info_df.to_csv(emb_folder / "slide_info.csv", index=False)
-    logger.info(f"Encoding done: {len(info_df)} slides, {int(info_df['n_tiles'].sum())} total tiles")
+    if slide_info_path.exists():
+        info_df = pd.read_csv(slide_info_path)
+        logger.info(f"Encoding done: {len(info_df)} slides, {int(info_df['n_tiles'].sum())} total tiles")
 
 
 if __name__ == "__main__":

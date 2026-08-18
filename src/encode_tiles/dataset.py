@@ -37,7 +37,7 @@ class WSITileDataset(Dataset):
     def __init__(
             self,
             slide_dict,
-            magnification_tile=10,
+            magnification_tile=20,
             final_tile_size=224,
             resize = None,
             max_tiles_per_slide=None,
@@ -63,7 +63,6 @@ class WSITileDataset(Dataset):
         self.max_tiles_per_slide = max_tiles_per_slide
         self.magnification_tile = magnification_tile
         self.resize = resize
-        self.mask_level = -1
         self.mask_tolerance = mask_tolerance
         self.zone_mask_tolerance = zone_mask_tolerance
         self.mag_level0 = mag_level0
@@ -77,20 +76,15 @@ class WSITileDataset(Dataset):
             self.slides[slide_id] = slide
         
         # Save folders
-        self.save_tile_image_folder = save_tile_image_folder
-        if save_tile_image_folder is not None:
-            self.save_tile_image_folder = Path(save_tile_image_folder)
-            self.save_tile_image_folder.mkdir(exist_ok=True, parents=True)
-
-        self.save_masked_thumbnail_folder = save_masked_thumbnail_folder
-        if save_masked_thumbnail_folder is not None:
-            self.save_masked_thumbnail_folder = Path(save_masked_thumbnail_folder)
-            self.save_masked_thumbnail_folder.mkdir(exist_ok=True, parents=True)
-
-        self.save_thumbnail_folder = save_thumbnail_folder
-        if save_thumbnail_folder is not None:
-            self.save_thumbnail_folder = Path(save_thumbnail_folder)
-            self.save_thumbnail_folder.mkdir(exist_ok=True, parents=True)
+        for attr, folder in [
+            ("save_tile_image_folder", save_tile_image_folder),
+            ("save_masked_thumbnail_folder", save_masked_thumbnail_folder),
+            ("save_thumbnail_folder", save_thumbnail_folder),
+        ]:
+            if folder is not None:
+                folder = Path(folder)
+                folder.mkdir(exist_ok=True, parents=True)
+            setattr(self, attr, folder)
 
 
         # Tile df
@@ -107,29 +101,6 @@ class WSITileDataset(Dataset):
                 self.tile_df.to_csv(save_df_path, index=False)
                 logger.info(f"Saved tile coords to {save_df_path}")
 
-        if self.save_thumbnail_folder is not None:
-            for slide_id, slide_df in self.tile_df.groupby("slide_id"):
-                slide = self.slides[slide_id]
-                thumbnail = self._get_thumbnail(slide)
-                save_thumbnail = self.save_thumbnail_folder / f'{slide_id}.png'
-                thumbnail.save(save_thumbnail)
-                logger.debug(f"Saved thumbnail: {save_thumbnail}")
-
-        
-        if self.save_masked_thumbnail_folder is not None:
-            for slide_id, slide_df in self.tile_df.groupby("slide_id"):
-                slide = self.slides[slide_id]
-                thumbnail = self._get_thumbnail(slide)
-
-                level_tile = int(slide_df["level"].iloc[0])
-                read_size = int(slide_df["read_size"].iloc[0])
-                actual_ds = slide.level_downsamples[level_tile]
-                size_at_0 = round(read_size * actual_ds)
-                self._make_masked_thumbnail(slide_df, slide, thumbnail, size_at_0)
-                
-                save_masked_thumbnail = self.save_masked_thumbnail_folder / f'{slide_id}.png'
-                thumbnail.save(save_masked_thumbnail)
-         
     def __len__(self) -> int:
         return len(self.tile_df)
 
@@ -195,7 +166,7 @@ class WSITileDataset(Dataset):
             slide = self.slides[slide_id]
             width, height = slide.dimensions
 
-            contour_tile_coords, size_at_0 = self._prepare_slide_tile_coords(
+            contour_tile_coords, size_at_0, mask_level = self._prepare_slide_tile_coords(
                 slide_id = slide_id,
                 slide_info = slide_info,
             )
@@ -204,6 +175,7 @@ class WSITileDataset(Dataset):
                 "height": height,
                 "tile_size_mag0": size_at_0,
                 "mag_level0": self.mag_level0,
+                "mask_level": mask_level,
             }
             tile_coords.extend(contour_tile_coords)
 
@@ -225,11 +197,21 @@ class WSITileDataset(Dataset):
 
         return tile_df[["tile_id", "slide_id", "level", "read_size", "x", "y"]], slide_metadata
 
-    def _prepare_slide_tile_coords(self, slide_id: str, slide_info: dict) -> tuple[list[dict], int]:
-        """Compute valid tile coordinates for a single slide. Returns (tile_coords, size_at_0)."""
+    def _choose_mask_level(self, slide: "openslide.OpenSlide", size_at_0: int) -> int:
+        """Pick the coarsest pyramid level whose downsample stays at or below the
+        tile grid step (size_at_0), so each tile spans at least one full mask pixel.
+        """
+        for level in range(slide.level_count - 1, -1, -1):
+            if slide.level_downsamples[level] <= size_at_0:
+                return level
+        return 0
+
+    def _prepare_slide_tile_coords(self, slide_id: str, slide_info: dict) -> tuple[list[dict], int, int]:
+        """Compute valid tile coordinates for a single slide. Returns (tile_coords, size_at_0, mask_level)."""
         slide = self.slides[slide_id]
-        thumbnail = self._get_thumbnail(slide)
         level_tile, read_size, size_at_0 = self._get_level_info(slide_id, slide_info["slide_path"])
+        mask_level = self._choose_mask_level(slide, size_at_0)
+        thumbnail = self._get_thumbnail(slide, mask_level)
 
         contour_coordinates = None
         if "annotation_path" in slide_info and "contour_ids" in slide_info:
@@ -238,14 +220,27 @@ class WSITileDataset(Dataset):
                 contour_ids = slide_info["contour_ids"],
             )
 
-        dico = self._get_clean_grid(slide, thumbnail, level_tile, size_at_0, contour_coordinates)
+        dico = self._get_clean_grid(
+            slide, thumbnail, size_at_0, mask_level, contour_coordinates,
+        )
         contour_tile_coords = [
             {"slide_id": slide_id, "level": level_tile, "read_size": read_size, "x": coord[1], "y": coord[0]}
             for coord in dico['tile_coords']
         ]
-        logger.info(f"  Slide {slide_id}: {len(contour_tile_coords)} valid tiles at level {level_tile}")
+        logger.info(f"  Slide {slide_id}: {len(contour_tile_coords)} valid tiles at level {level_tile} (mask_level={mask_level})")
 
-        return contour_tile_coords, size_at_0
+        if self.save_thumbnail_folder is not None:
+            save_thumbnail = self.save_thumbnail_folder / f'{slide_id}.png'
+            thumbnail.save(save_thumbnail)
+            logger.debug(f"Saved thumbnail: {save_thumbnail}")
+
+        if self.save_masked_thumbnail_folder is not None:
+            slide_df = pd.DataFrame(contour_tile_coords)
+            self._make_masked_thumbnail(slide_df, slide, thumbnail, size_at_0, mask_level)
+            save_masked_thumbnail = self.save_masked_thumbnail_folder / f'{slide_id}.png'
+            thumbnail.save(save_masked_thumbnail)
+
+        return contour_tile_coords, size_at_0, mask_level
 
     def _get_level_info(self, slide_id: str, slide_path: str | Path) -> tuple[int, int, int]:
         """Return (level, read_size, size_at_0) for tile extraction at the target magnification.
@@ -270,8 +265,8 @@ class WSITileDataset(Dataset):
             read_size = 224*0.5/1 = 112 → resize 112→224 (upsampling — warning logged)
         """
         self.ext = Path(slide_path).suffix
-        self.mag_level0 = self._get_magnification(slide_path)
         slide = self.slides[slide_id]
+        self.mag_level0 = self._get_magnification(slide)
 
         target_ds = self.mag_level0 / self.magnification_tile  # e.g. 40/20 = 2.0
 
@@ -300,9 +295,8 @@ class WSITileDataset(Dataset):
         )
         return best_level, read_size, size_at_0
     
-    def _get_magnification(self, slide_path: str | Path) -> float:
+    def _get_magnification(self, slide_object: "openslide.OpenSlide") -> float:
         """Read the scanning magnification from slide metadata (mpp or user override)."""
-        slide_object = openslide.OpenSlide(slide_path)
         if self.mag_level0 is not None:
             mag = self.mag_level0
             logger.info(f"  Magnification: {mag}x (user-specified)")
@@ -318,15 +312,22 @@ class WSITileDataset(Dataset):
             raise ValueError("Please specify mag_level0 value.")
         return mag
     
-    def _get_thumbnail(self, slide: "openslide.OpenSlide") -> "Image.Image":
-        """Return a downsampled thumbnail at the lowest resolution pyramid level."""
-        thumbnail = slide.get_thumbnail(slide.level_dimensions[self.mask_level])
+    def _get_thumbnail(self, slide: "openslide.OpenSlide", mask_level: int) -> "Image.Image":
+        """Return a downsampled thumbnail at the given pyramid level."""
+        thumbnail = slide.get_thumbnail(slide.level_dimensions[mask_level])
         return thumbnail
- 
-    def _make_masked_thumbnail(self, tile_df: pd.DataFrame, slide: "openslide.OpenSlide", thumbnail: "Image.Image", size_at_0: int) -> None:
+
+    def _make_masked_thumbnail(
+            self,
+            tile_df: pd.DataFrame,
+            slide: "openslide.OpenSlide",
+            thumbnail: "Image.Image",
+            size_at_0: int,
+            mask_level: int,
+        ) -> None:
         """Draw red tile outlines on the thumbnail in place."""
         draw = ImageDraw.Draw(thumbnail)
-        ds = slide.level_downsamples[self.mask_level]
+        ds = slide.level_downsamples[mask_level]
         for _, tile_row in tile_df.iterrows():
             x, y = tile_row["x"], tile_row["y"]
             scaled_x, scaled_y = x // ds, y // ds
@@ -337,10 +338,17 @@ class WSITileDataset(Dataset):
             )
             # draw.text((scaled_x, scaled_y), str(index), fill='red')
 
-    def _get_clean_grid(self, slide: "openslide.OpenSlide", thumbnail: "Image.Image", level_tile: int, size_at_0: int, zone_coordinates: list | None = None) -> dict:
+    def _get_clean_grid(
+            self,
+            slide: "openslide.OpenSlide",
+            thumbnail: "Image.Image",
+            size_at_0: int,
+            mask_level: int,
+            zone_coordinates: list | None = None,
+        ) -> dict:
         """Build a tissue-filtered tile grid, optionally restricted to annotated zones."""
         slide_height, slide_width = slide.dimensions[1], slide.dimensions[0]
-        mask_ds = int(slide.level_downsamples[self.mask_level])
+        mask_ds = int(slide.level_downsamples[mask_level])
         mask = self._make_auto_mask(thumbnail)
         if zone_coordinates is not None:
             zone_mask = self._make_zone_mask(zone_coordinates, mask.shape, mask_ds)
